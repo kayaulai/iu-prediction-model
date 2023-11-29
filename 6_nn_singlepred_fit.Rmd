@@ -1,0 +1,439 @@
+---
+title: "Fitting"
+output: html_notebook
+editor_options: 
+  chunk_output_type: inline
+---
+```{r}
+library(tidyverse)
+library(tidyr)
+library(tensorflow)
+library(keras)
+library(rlang)
+library(cowplot)
+load("sbc.Rdata")
+load("predict_df.Rdata")
+```
+
+
+
+## Getting response and predictor variables
+
+
+```{r}
+fitIUBinaryModel = function(predict_df,
+                            predict_df_test,
+                            predictors,
+                            response,
+                             lr_initial = 0.0005,
+                             lr_multiplier = 0.1,
+                             l1_weight = 0.001,
+                             l2_weight = 0.001,
+                             epochs = 5,
+                             batch_size = 32){
+  print("Doing one-hot encoding ...")
+  y = (as.integer(predict_df[[response]]) %>% as.matrix)
+  x_parts = lapply(predictors, function(x){
+    if(!str_detect(x, "currLength") & !str_detect(x, ":")){
+      to_categorical(as.integer(predict_df[[x]])-1, num_classes = length(levels(predict_df[[x]])))
+    } else if(str_detect(x, ":")) {
+      names = str_split(x, ":")[[1]]
+      #I'll assume that it's always a categorical value:an integer value
+      to_categorical(as.integer(predict_df[[names[1]]])-1, num_classes = length(levels(predict_df[[names[1]]]))) * predict_df[[names[2]]]
+    } else if (x %in% c("currLength", "currLengthSq")){
+      to_categorical(predict_df[[x]], num_classes = 21)
+    } else {
+      predict_df[[x]]
+    }
+  })
+  x = purrr::reduce(x_parts, cbind)
+  input_dim = ncol(x)
+  
+  
+  print("Defining and compiling model ...")
+  model = keras_model_sequential() %>% layer_dense(units = 1L,
+                                activation = "sigmoid",
+                                input_shape = input_dim,
+                                kernel_regularizer = regularizer_l1_l2(l1 = l1_weight, l2 = l2_weight))
+  model %>% compile(
+    loss = loss_binary_crossentropy(),
+    optimizer = optimizer_adam(),
+    metrics = metric_binary_accuracy()
+  )
+  
+  print("Starting the fitting ...")
+  #Weighting: https://arxiv.org/abs/1901.05555
+  model %>% fit(x, y,
+                epochs = epochs,
+                batch_size = batch_size,
+                sample_weight = 1/predict_df$totalLength,
+                callbacks = list(
+    callback_learning_rate_scheduler(function(epoch, rate){
+      current = lr_initial * lr_multiplier ^ epoch
+    })))
+  
+  print("Getting predictions and results ...")  
+  
+  
+  x_parts_test = lapply(predictors, function(x){
+    if(!str_detect(x, "currLength") & !str_detect(x, ":")){
+      to_categorical(as.integer(predict_df_test[[x]])-1, num_classes = length(levels(predict_df_test[[x]])))
+    } else if(str_detect(x, ":")) {
+      names = str_split(x, ":")[[1]]
+      #I'll assume that it's always a categorical value:an integer value
+      to_categorical(as.integer(predict_df_test[[names[1]]])-1, num_classes = length(levels(predict_df_test[[names[1]]]))) * predict_df_test[[names[2]]]
+    } else if (x %in% c("currLength", "currLengthSq")){
+      to_categorical(predict_df_test[[x]], num_classes = 21)
+    } else {
+      predict_df_test[[x]]
+    }
+  })
+  x_test = purrr::reduce(x_parts_test, cbind)
+  full_predictions = model %>% predict(x_test, batch_size = batch_size)
+  if(response == "preBoundary"){
+    result_df = predict_df_test %>% cbind(probBoundary = full_predictions %>% as.vector)
+  } else if(response == "preClosure"){
+    result_df = predict_df_test %>% cbind(probClosure = full_predictions %>% as.vector)
+  } else if(response == "preAppeal"){
+    result_df = predict_df_test %>% cbind(probAppeal = full_predictions %>% as.vector)
+  } else if(response == "preContinue"){
+    result_df = predict_df_test %>% cbind(probContinue = full_predictions %>% as.vector)
+  }
+
+  weights = get_weights(model)
+  x_levels = lapply(predictors, function(x){
+    if(str_detect(x, ":")){
+      word = strsplit(x, ":")[[1]][1]
+      result = paste0(x, "_", levels(predict_df[[word]]))
+    } else if(str_detect(x, "currLength")){
+      paste0(x, "_", 1:21)
+    } else {
+      paste0(x, "_", levels(predict_df[[x]]))
+    }
+  }) 
+  rownames(weights[[1]]) = x_levels %>% purrr::reduce(function(x,y) c(x,y))
+  
+  print("Done with one model!")
+  list(model = model, weights = weights, result_df = result_df)
+}
+
+
+
+```
+
+
+
+```{r}
+fitIUBinaryModelHidden = function(predict_df,
+                            predict_df_test,
+                            predictors,
+                            response,
+                             lr_initial = 0.0005,
+                             lr_multiplier = 0.1,
+                             l1_weight = 0.001,
+                             l2_weight = 0.001,
+                             epochs = 5L,
+                             batch_size = 32L,
+                             hiddenSize = 50L){
+  print("Doing one-hot encoding ...")
+  y = (as.integer(predict_df[[response]]) %>% as.matrix)
+  x_parts = lapply(predictors, function(x){
+    if(!str_detect(x, "currLength") & !str_detect(x, ":")){
+      to_categorical(as.integer(predict_df[[x]])-1, num_classes = length(levels(predict_df[[x]])))
+    } else if(str_detect(x, ":")) {
+      names = str_split(x, ":")[[1]]
+      #I'll assume that it's always a categorical value:an integer value
+      to_categorical(as.integer(predict_df[[names[1]]])-1, num_classes = length(levels(predict_df[[names[1]]]))) * predict_df[[names[2]]]
+    } else if (x %in% c("currLength", "currLengthSq")){
+      to_categorical(predict_df[[x]], num_classes = 21)
+    } else {
+      predict_df[[x]]
+    }
+  })
+  x = purrr::reduce(x_parts, cbind)
+  input_dim = ncol(x)
+  
+  
+  print("Defining and compiling model ...")
+  model = keras_model_sequential() %>% layer_dense(units = hiddenSize,
+                                activation = "relu",
+                                input_shape = input_dim,
+                                kernel_regularizer = regularizer_l1_l2(l1 = l1_weight, l2 = l2_weight)) %>%   
+                             layer_dense(units = 1L,
+                                activation = "sigmoid",
+                                kernel_regularizer = regularizer_l1_l2(l1 = l1_weight, l2 = l2_weight))
+  model %>% compile(
+    loss = loss_binary_crossentropy(),
+    optimizer = optimizer_adam(),
+    metrics = metric_binary_accuracy()
+  )
+  
+  print("Starting the fitting ...")
+  #Weighting: https://arxiv.org/abs/1901.05555
+  model %>% fit(x, y,
+                epochs = epochs,
+                batch_size = batch_size,
+                sample_weight = 1/predict_df$totalLength,
+                callbacks = list(
+    callback_learning_rate_scheduler(function(epoch, rate){
+      current = lr_initial * lr_multiplier ^ epoch
+    })))
+  
+  print("Getting predictions and results ...")  
+  
+  
+  x_parts_test = lapply(predictors, function(x){
+    if(!str_detect(x, "currLength") & !str_detect(x, ":")){
+      to_categorical(as.integer(predict_df_test[[x]])-1, num_classes = length(levels(predict_df_test[[x]])))
+    } else if(str_detect(x, ":")) {
+      names = str_split(x, ":")[[1]]
+      #I'll assume that it's always a categorical value:an integer value
+      to_categorical(as.integer(predict_df_test[[names[1]]])-1, num_classes = length(levels(predict_df_test[[names[1]]]))) * predict_df_test[[names[2]]]
+    } else if (x %in% c("currLength", "currLengthSq")){
+      to_categorical(predict_df_test[[x]], num_classes = 21)
+    } else {
+      predict_df_test[[x]]
+    }
+  })
+  x_test = purrr::reduce(x_parts_test, cbind)
+  full_predictions = model %>% predict(x_test, batch_size = batch_size)
+  if(response == "preBoundary"){
+    result_df = predict_df_test %>% cbind(probBoundary = full_predictions %>% as.vector)
+  } else if(response == "preClosure"){
+    result_df = predict_df_test %>% cbind(probClosure = full_predictions %>% as.vector)
+  } else if(response == "preAppeal"){
+    result_df = predict_df_test %>% cbind(probAppeal = full_predictions %>% as.vector)
+  } else if(response == "preContinue"){
+    result_df = predict_df_test %>% cbind(probContinue = full_predictions %>% as.vector)
+  }
+
+  weights = get_weights(model)
+  x_levels = lapply(predictors, function(x){
+    if(str_detect(x, ":")){
+      word = strsplit(x, ":")[[1]][1]
+      result = paste0(x, "_", levels(predict_df[[word]]))
+    } else if(str_detect(x, "currLength")){
+      paste0(x, "_", 1:21)
+    } else {
+      paste0(x, "_", levels(predict_df[[x]]))
+    }
+  }) 
+  rownames(weights[[1]]) = x_levels %>% purrr:reduce(function(x,y) c(x,y))
+  
+  print("Done with one model!")
+  list(model = model, weights = weights, result_df = result_df)
+}
+
+
+
+```
+
+
+
+```{r}
+metrics = function(model, currDecisions = NULL){
+  if(is.null(currDecisions)){
+    rm(currDecisions)
+  } else {
+    model$result_df = model$result_df %>% mutate(decision = currDecisions)
+  }
+  
+  boundaryTP = model$result_df %>% filter(nextEndnote != "noBoundary" & decision != "noBoundary") %>% nrow
+  boundaryTN = model$result_df %>% filter(nextEndnote == "noBoundary" & decision == "noBoundary") %>% nrow
+  boundaryFP = model$result_df %>% filter(nextEndnote == "noBoundary" & decision != "noBoundary") %>% nrow
+  boundaryFN = model$result_df %>% filter(nextEndnote != "noBoundary" & decision == "noBoundary") %>% nrow
+  
+  boundaryPrecision = boundaryTP / (boundaryTP + boundaryFP)
+  boundaryRecall = boundaryTP / (boundaryTP + boundaryFN)
+  boundaryFPR = boundaryFP / (boundaryFP + boundaryTN)
+  
+  terminalTP = model$result_df %>% filter((nextEndnote %in% c("final", "appeal")) & (decision %in% c("final", "appeal"))) %>% nrow
+  terminalTN = model$result_df %>% filter(!(nextEndnote %in% c("final", "appeal")) & !(decision %in% c("final", "appeal"))) %>% nrow
+  terminalFP = model$result_df %>% filter(!(nextEndnote %in% c("final", "appeal")) & (decision %in% c("final", "appeal"))) %>% nrow
+  terminalFN = model$result_df %>% filter((nextEndnote %in% c("final", "appeal")) & !(decision %in% c("final", "appeal"))) %>% nrow
+  
+  terminalPrecision = terminalTP / (terminalTP + terminalFP)
+  terminalRecall = terminalTP / (terminalTP + terminalFN)
+  terminalFPR = terminalFP / (terminalFP + terminalTN)
+  
+  finalTP = model$result_df %>% filter(nextEndnote == "final" & decision == "final") %>% nrow
+  finalTN = model$result_df %>% filter(nextEndnote != "final" & decision != "final") %>% nrow
+  finalFP = model$result_df %>% filter(nextEndnote != "final" & decision == "final") %>% nrow
+  finalFN = model$result_df %>% filter(nextEndnote == "final" & decision != "final") %>% nrow
+  
+  finalPrecision = finalTP / (finalTP + finalFP)
+  finalRecall = finalTP / (finalTP + finalFN)
+  finalFPR = finalFP / (finalFP + finalTN)
+  
+  
+  appealTP = model$result_df %>% filter(nextEndnote == "appeal" & decision == "appeal") %>% nrow
+  appealTN = model$result_df %>% filter(nextEndnote != "appeal" & decision != "appeal") %>% nrow
+  appealFP = model$result_df %>% filter(nextEndnote != "appeal" & decision == "appeal") %>% nrow
+  appealFN = model$result_df %>% filter(nextEndnote == "appeal" & decision != "appeal") %>% nrow
+  
+  appealPrecision = appealTP / (appealTP + appealFP)
+  appealRecall = appealTP / (appealTP + appealFN)
+  appealFPR = appealFP / (appealFP + appealTN)
+  
+  
+  continuingTP = model$result_df %>% filter(nextEndnote == "continuing" & decision == "continuing") %>% nrow
+  continuingTN = model$result_df %>% filter(nextEndnote != "continuing" & decision != "continuing") %>% nrow
+  continuingFP = model$result_df %>% filter(nextEndnote != "continuing" & decision == "continuing") %>% nrow
+  continuingFN = model$result_df %>% filter(nextEndnote == "continuing" & decision != "continuing") %>% nrow
+  
+  continuingPrecision = continuingTP / (continuingTP + continuingFP)
+  continuingRecall = continuingTP / (continuingTP + continuingFN)
+  continuingFPR = continuingFP / (continuingFP + continuingTN)
+  
+  
+  breakTP = model$result_df %>% filter(nextEndnote == "break" & decision == "break") %>% nrow
+  breakTN = model$result_df %>% filter(nextEndnote != "break" & decision != "break") %>% nrow
+  breakFP = model$result_df %>% filter(nextEndnote != "break" & decision == "break") %>% nrow
+  breakFN = model$result_df %>% filter(nextEndnote == "break" & decision != "break") %>% nrow
+  
+  breakPrecision = breakTP / (breakTP + breakFP)
+  breakRecall = breakTP / (breakTP + breakFN)
+  breakFPR = breakFP / (breakFP + breakTN)
+  
+  list(boundaryPrecision = boundaryPrecision, boundaryRecall = boundaryRecall, boundaryFPR = boundaryFPR,
+       terminalPrecision = terminalPrecision, terminalRecall = terminalRecall, terminalFPR = terminalFPR,
+       appealPrecision = appealPrecision, appealRecall = appealRecall, appealFPR = appealFPR,
+       finalPrecision = finalPrecision, finalRecall = finalRecall, finalFPR = finalFPR,
+       continuingPrecision = continuingPrecision, continuingRecall = continuingRecall, continuingFPR = continuingFPR,
+       breakPrecision = breakPrecision, breakRecall = breakRecall, breakFPR = breakFPR)
+}
+
+```
+
+
+```{r}
+getDecisionsBinary = function(result_df, boundThres = .5, closureThres = .5, appealThres = .5, continueThres = .5){
+  case_when(
+    result_df$probBoundary < boundThres ~ "noBoundary",
+    result_df$probClosure >= closureThres & result_df$probAppeal < appealThres ~"final",
+    result_df$probClosure >= closureThres ~"appeal",
+    result_df$probClosure < closureThres & result_df$probContinue >= continueThres ~ "continuing",
+    T ~ "break"
+  )
+}
+
+
+fitIUBinaryModelGroup = function(data_df, predictors, fitFunct = fitIUBinaryModel,  ...){
+  set.seed(20221023)
+  testDocs = paste0("sbc", str_pad(as.numeric(sample(1:60, 6)), width = 3, pad = "0"))
+  train = data_df %>% filter(!(docId %in% testDocs))
+  test = data_df %>% filter(docId %in% testDocs)
+  
+  model_boundary = fitFunct(train, test, predictors, "preBoundary", ...)
+  model_closure = fitFunct(train %>% filter(nextEndnote != "noBoundary"), test, predictors, "preClosure", ...)
+  model_appeal = fitFunct(train %>% filter(nextEndnote %in% c("final", "appeal")), test, predictors, "preAppeal", ...)
+  model_continue = fitFunct(train %>%  filter(nextEndnote %in% c("continuing", "break")), test,  predictors, "preContinue", ...)
+  
+  result_df = model_boundary$result_df %>% left_join(
+    model_closure$result_df %>% select(docId, unitId, corpusSeq, probClosure), by = c("docId", "unitId", "corpusSeq")
+) %>% left_join(
+    model_appeal$result_df %>% select(docId, unitId, corpusSeq, probAppeal), by = c("docId", "unitId", "corpusSeq")
+  ) %>% left_join(
+    model_continue$result_df %>% select(docId, unitId, corpusSeq, probContinue), by = c("docId", "unitId", "corpusSeq")
+  )
+  result_df = result_df %>% ungroup %>% mutate(decision = getDecisionsBinary(result_df))
+  result_df %>% select(nextEndnote, decision, probBoundary, probClosure, probAppeal, probContinue) %>% View
+  
+  list(models = list(model_boundary, model_closure, model_appeal, model_continue), result_df = result_df)
+}
+
+set.seed(20221023)
+
+
+getROC = function(model, points = seq(0, 1, .05), decisionFunct){
+  recalls = numeric()
+  fprs = numeric()
+  for(currThres in points){
+    decisions = decisionFunct(model$result_df, boundThres = currThres)
+    allMetrics = metrics(model, decisions)
+    recalls = c(recalls, allMetrics$boundaryRecall)
+    fprs = c(fprs, allMetrics$boundaryFPR)
+  }
+  ggplot(data = data.frame(fprs, recalls), aes(x = fprs, y = recalls)) + geom_line()
+}
+
+```
+
+
+Unused models:
+
+
+```{r}
+model_full_win3_split = fitIUBinaryModelGroup(predict_df, c("prevEndnote", "prev1", "prev2", "prev3", "currLength", "init1", "init2", "init3", "init1:currLength", "init2:currLength", "init3:currLength", "init1:currLengthSq", "init2:currLengthSq", "init3:currLengthSq"), epochs = 3)
+metrics(model_full_win3_split)
+
+
+model_full_win3_split_roc = getROC(model_full_win3_split, points = seq(0, 1, .025), decisionFunct = getDecisionsBinary)
+
+
+model_full_win3_split_hidden = fitIUBinaryModelGroup(predict_df, c("prevEndnote", "prev1", "prev2", "prev3", "currLength", "init1", "init2", "init3"), fitFunct = fitIUBinaryModelHidden, epochs = 3)
+metrics(model_full_win3_split_hidden)
+
+model_full_win3_split_hidden = fitIUBinaryModelGroup(predict_df, c("prevEndnote", "prev1", "prev2", "prev3", "currLength", "init1", "init2", "init3"), fitFunct = fitIUBinaryModelHidden, l2_weight = 0.00001, l1_weight = 0.00001, epochs = 3)
+metrics(model_full_win3_split_hidden)
+getROC(model_full_win3_split_hidden, decisionFunct = getDecisionsBinary)
+
+model_full_win3_split_unreg = fitIUBinaryModelGroup(predict_df, c("prevEndnote", "prev1", "prev2", "prev3", "currLength", "init1", "init2", "init3", "init1:currLength", "init2:currLength", "init3:currLength", "init1:currLengthSq", "init2:currLengthSq", "init3:currLengthSq"), l2_weight = 0, l1_weight = 0, epochs = 3)
+metrics(model_full_win3_split_unreg)
+
+model_full_win3_split_withcurr_unreg = fitIUBinaryModelGroup(predict_df, c("prevEndnote", "prev1", "prev2", "prev3", "curr", "currLength", "init1", "init2", "init3", "init1:currLength", "init2:currLength", "init3:currLength", "init1:currLengthSq", "init2:currLengthSq", "init3:currLengthSq"), l2_weight = 0, l1_weight = 0, epochs = 3)
+metrics(model_full_win3_split_withcurr_unreg)
+
+
+model_full_win3_split_hidden_unreg = fitIUBinaryModelGroup(predict_df, c("prevEndnote", "prev1", "prev2", "prev3", "currLength", "init1", "init2", "init3"), fitFunct = fitIUBinaryModelHidden, l2_weight = 0, l1_weight = 0, epochs = 3)
+metrics(model_full_win3_split_hidden_unreg)
+
+
+model_full_win3_split_withcurr_hidden_unreg = fitIUBinaryModelGroup(predict_df, c("prevEndnote", "prev1", "prev2", "prev3", "curr", "currLength", "init1", "init2", "init3"), l2_weight = 0, l1_weight = 0, fitFunct = fitIUBinaryModelHidden, epochs = 3, hiddenSize = 100L)
+metrics(model_full_win3_split_withcurr_hidden_unreg)
+
+model_full_win3_speaker_unreg = fitIUBinaryModelGroup(predict_df, c("prevEndnote", "prev1", "prev2", "prev3", "currLength", "init1", "init2", "init3", "init1:currLength", "init2:currLength", "init3:currLength", "init1:currLengthSq", "init2:currLengthSq", "init3:currLengthSq", "curr", "next1", "next2", "next3"), l2_weight = 0, l1_weight = 0, epochs = 3)
+metrics(model_full_win3_speaker_unreg)
+
+model_full_win3_speaker_hidden_unreg = fitIUBinaryModelGroup(predict_df, c("prevEndnote", "prev1", "prev2", "prev3", "currLength", "init1", "init2", "init3", "init1:currLength", "init2:currLength", "init3:currLength", "init1:currLengthSq", "init2:currLengthSq", "init3:currLengthSq", "next1", "next2", "next3"), l2_weight = 0, l1_weight = 0, epochs = 3, fitFunct = fitIUBinaryModelHidden)
+metrics(model_full_win3_speaker_hidden_unreg)
+
+model_full_win3_noinit_unreg = fitIUBinaryModelGroup(predict_df, c("prevEndnote", "prev1", "prev2", "prev3", "currLength", "curr", "next1", "next2", "next3"), l2_weight = 0, l1_weight = 0, epochs = 3)
+metrics(model_full_win3_noinit_unreg)
+
+
+
+getROC(model_full_win3_split_hidden, decisionFunct = getDecisionsBinary)
+getROC(model_full_win3_split_hidden_unreg, decisionFunct = getDecisionsBinary)
+getROC(model_full_win3_split_withcurr_hidden_unreg, decisionFunct = getDecisionsBinary)
+getROC(model_full_win3_speaker_hidden_unreg, decisionFunct = getDecisionsBinary)
+
+
+```
+
+Used models:
+
+```{r}
+model_full_win3_split_unreg = fitIUBinaryModelGroup(predict_df, c("prevEndnote", "prev1", "prev2", "prev3", "currLength", "init1", "init2", "init3", "init1:currLength", "init2:currLength", "init3:currLength", "init1:currLengthSq", "init2:currLengthSq", "init3:currLengthSq"), l2_weight = 0, l1_weight = 0, epochs = 3)
+metrics(model_full_win3_split_unreg)
+#.454, .368
+getROC(model_full_win3_split_unreg, decisionFunct = getDecisionsBinary)
+
+
+model_full_win3_split_withcurr_unreg = fitIUBinaryModelGroup(predict_df, c("prevEndnote", "prev1", "prev2", "prev3", "curr", "currLength", "init1", "init2", "init3", "init1:currLength", "init2:currLength", "init3:currLength", "init1:currLengthSq", "init2:currLengthSq", "init3:currLengthSq"), l2_weight = 0, l1_weight = 0, epochs = 3)
+metrics(model_full_win3_split_withcurr_unreg)
+#.571, .563
+getROC(model_full_win3_split_withcurr_unreg, decisionFunct = getDecisionsBinary)
+
+model_full_win3_speaker_unreg = fitIUBinaryModelGroup(predict_df, c("prevEndnote", "prev1", "prev2", "prev3", "currLength", "init1", "init2", "init3", "init1:currLength", "init2:currLength", "init3:currLength", "init1:currLengthSq", "init2:currLengthSq", "init3:currLengthSq", "curr", "next1", "next2", "next3"), l2_weight = 0, l1_weight = 0, epochs = 3)
+#.992, 1.000
+metrics(model_full_win3_speaker_unreg)
+getROC(model_full_win3_speaker_unreg, decisionFunct = getDecisionsBinary)
+
+
+metrics = rbind(c(name = "listener_nocurr", metrics(model_full_win3_split_unreg)),
+      c(name = "listener", metrics(model_full_win3_split_withcurr_unreg)),
+      c(name = "listener", metrics(model_full_win3_speaker_unreg)))
+
+save(list = c("model_full_win3_split_unreg", "model_full_win3_split_withcurr_unreg", "model_full_win3_speaker_unreg", "metrics"), file = "usedModels.Rdata")
+```
